@@ -3,21 +3,28 @@
 #include "base/logging.hh"
 
 namespace ReplacementPolicy {
-constexpr unsigned LRUIPVRP::IPV_K;                         // <-- add this line
-constexpr unsigned LRUIPVRP::IPV[LRUIPVRP::IPV_K + 1];      // existing (or add if missing);
+
+/** Provide definitions for the static constexprs declared in the header. */
+constexpr unsigned LRUIPVRP::IPV_K;
+constexpr unsigned LRUIPVRP::IPV[LRUIPVRP::IPV_K + 1] = {
+    /* promotion targets for positions 0..15, then insertion at index 16 */
+    0, 0, 1, 0, 3, 0, 1, 2, 1, 0, 5, 1, 0, 0, 1, 11, 13
+};
 
 LRUIPVRP::LRUIPVRP(const Params &p)
   : Base(p), ways(p.numWays)
 {
     /**
-     * Constructor safety checks.
-     * We deliberately hard-code this policy to k=16 to match the given IPV.
-     * If the backing cache has a different associativity, fail fast with a
-     * descriptive error so the misconfiguration is surfaced during init.
+     * Constructor safety / mode selection.
+     * If the cache is 16-way, we can safely use the hard-coded IPV table.
+     * If not (e.g., 2-way L1), use a simple LRU-like fallback so global
+     * --repl_policy still works without crashing the simulation.
      */
-    fatal_if(ways != IPV_K,
-        "LRUIPVRP is hard-coded for %u-way sets, but cache has %u ways.",
-        IPV_K, ways);
+    useIpv = (ways == IPV_K);
+    if (!useIpv) {
+        warn("LRUIPVRP: cache associativity is %u; using LRU-like fallback "
+             "for this cache (IPV requires %u).", ways, IPV_K);
+    }
 }
 
 void
@@ -25,12 +32,18 @@ LRUIPVRP::reset(const std::shared_ptr<::ReplacementPolicy::ReplacementData>& rd)
 {
     /**
      * Insertion behavior.
-     * On allocation/fill, set the line's depth to IPV[k], which is the policy-
-     * defined insertion position. Depth is clamped to [0..k-1] by construction
-     * of the IPV array, so no further bounds checks are required here.
+     * When a line is (re)allocated, initialize its recency depth.
+     * - IPV mode (16-way): set depth to IPV[k] (index 16), which controls how
+     *   aggressively a new line competes (e.g., 13 = near LRU).
+     * - Fallback mode: set depth to (ways-1) to approximate "insert at LRU".
+     * This mirrors common LRU variants where a new line must prove reuse.
      */
     auto d = std::static_pointer_cast<IPVReplData>(rd);
-    d->depth = static_cast<uint8_t>(IPV[IPV_K]); // IPV[16] == 13
+    if (useIpv) {
+        d->depth = static_cast<uint8_t>(IPV[IPV_K]); // IPV[16] == 13
+    } else {
+        d->depth = static_cast<uint8_t>(ways - 1);
+    }
 }
 
 void
@@ -38,14 +51,20 @@ LRUIPVRP::touch(const std::shared_ptr<::ReplacementPolicy::ReplacementData>& rd)
 {
     /**
      * Promotion behavior on hit.
-     * We treat the current depth as "position i" in the virtual recency stack
-     * and update it to IPV[i]. This models promoting some hits part-way toward
-     * MRU (or leaving them), which can outperform classic "promote to MRU".
+     * - IPV mode: treat current depth as stack position i and update to IPV[i],
+     *   modeling partial promotions that may outperform "promote to MRU".
+     * - Fallback mode: promote directly to MRU (depth = 0), i.e., standard LRU.
+     * A defensive clamp ensures i ∈ [0..k-1] in IPV mode, though it should not
+     * trigger under normal operation.
      */
     auto d = std::static_pointer_cast<IPVReplData>(rd);
-    unsigned cur = d->depth;
-    if (cur >= IPV_K) cur = IPV_K - 1;     // defensive clamp, should not trigger
-    d->depth = static_cast<uint8_t>(IPV[cur]);
+    if (useIpv) {
+        unsigned cur = d->depth;
+        if (cur >= IPV_K) cur = IPV_K - 1; // defensive clamp
+        d->depth = static_cast<uint8_t>(IPV[cur]);
+    } else {
+        d->depth = 0;
+    }
 }
 
 void
@@ -53,9 +72,8 @@ LRUIPVRP::invalidate(const std::shared_ptr<::ReplacementPolicy::ReplacementData>
 {
     /**
      * No special invalidation needed.
-     * Our per-entry state consists solely of a bounded depth counter, which is
-     * ignored for invalid lines and will be reset upon the next allocation.
-     * Leaving this empty keeps the implementation minimal and correct.
+     * Our only state is a small depth value, which is ignored for invalid lines
+     * and reinitialized on the next reset(). Leaving this empty is sufficient.
      */
     return;
 }
@@ -65,9 +83,9 @@ LRUIPVRP::getVictim(const ReplacementCandidates& candidates) const
 {
     /**
      * Victim selection by maximum depth (approximate LRU).
-     * We iterate all candidate lines in this set and choose the one with the
-     * largest 'depth' value. This avoids relying on any implicit mapping between
-     * candidate index and physical way, which gem5 does not specify.
+     * Iterate over all candidates in the set and pick the one with the largest
+     * depth value. This avoids any reliance on candidate order or physical way
+     * mapping and works for both IPV and fallback modes.
      */
     assert(!candidates.empty());
 
@@ -86,4 +104,3 @@ LRUIPVRP::getVictim(const ReplacementCandidates& candidates) const
 }
 
 } // namespace ReplacementPolicy
-

@@ -4,6 +4,7 @@
 #include "mem/cache/replacement_policies/base.hh"
 #include "base/logging.hh"
 #include "params/LRUIPVRP.hh"
+
 /**
  * LRU-IPV (Insertion/Promotion Vector) replacement policy — hard-coded for k=16.
  *
@@ -36,7 +37,7 @@ class LRUIPVRP : public Base
     };
 
   private:
-    /** This implementation is hard-wired to 16-way sets. */
+    /** This implementation is hard-wired to 16-way sets for IPV behavior. */
     static constexpr unsigned IPV_K = 16;
 
     /**
@@ -44,21 +45,28 @@ class LRUIPVRP : public Base
      * indices 0..k-1 give the promotion target for a block currently at that
      * "position/depth"; index k gives the insertion position for a new block.
      * All entries must be in [0..k-1]. The last entry (index 16) is 13 here.
+     *
+     * NOTE: Only declared here; definition with initializer is in the .cc to
+     * avoid ODR issues on older compilers/toolchains.
      */
-    static constexpr unsigned IPV[IPV_K + 1] = {
-        0, 0, 1, 0, 3, 0, 1, 2, 1, 0, 5, 1, 0, 0, 1, 11, 13
-    };
+    static constexpr unsigned IPV[IPV_K + 1];
 
-    /** Associativity as provided by the cache; must equal 16. */
+    /** Associativity as provided by the cache. */
     const unsigned ways;
+
+    /**
+     * Whether to use the hard-coded IPV (only when associativity == 16).
+     * If false (e.g., 2-way L1), we use a minimal LRU-like fallback so runs
+     * don’t fail fatally when a global --repl_policy applies to all levels.
+     */
+    bool useIpv = false;
 
   public:
     /**
      * Constructor.
-     * We verify the set associativity matches the hard-coded k=16; this prevents
-     * silent misconfiguration that would apply out-of-bounds indices or produce
-     * undefined behavior. If the associativity differs, we fatal with a clear
-     * message so the user knows to either adjust the cache or generalize IPV.
+     * If the associativity matches k=16, we enable the IPV behavior. Otherwise
+     * we warn and switch to an LRU-like fallback for this cache while preserving
+     * the depth-based victim choice contract.
      */
     LRUIPVRP(const Params &p);
 
@@ -76,35 +84,30 @@ class LRUIPVRP : public Base
 
     /**
      * Called when a block is (re)inserted into the set (fill/allocate).
-     * We set the line's depth to the insertion target defined by IPV[k], where
-     * k is the associativity (16 here). This embodies the "insertion policy"
-     * component of IPV, and determines how aggressively a new line competes
-     * with existing lines (near MRU vs near LRU).
+     * If IPV is active (16-way), set depth to IPV[k] (the insertion position).
+     * Otherwise, insert near LRU (depth = ways-1) so the line must prove reuse.
      */
     void reset(const std::shared_ptr<::ReplacementPolicy::ReplacementData>& rd) const override;
 
     /**
      * Called on every cache hit to update recency information.
-     * We interpret the current depth as the "position i" and map it to the new
-     * position IPV[i]. This realizes the "promotion policy" component of IPV
-     * without doing global per-set shifts, keeping the logic simple and local.
+     * If IPV is active, interpret current depth as position i and set depth to
+     * IPV[i] (promotion policy). Otherwise, promote to MRU (depth = 0).
      */
     void touch(const std::shared_ptr<::ReplacementPolicy::ReplacementData>& rd) const override;
 
     /**
      * Optional cleanup when a line becomes invalid; not required here.
-     * Some policies maintain additional flags or ages that need clearing on
-     * invalidation. Our bounded 'depth' is harmless and will be reinitialized
-     * by reset() on the next allocation, so we leave this empty intentionally.
+     * Our bounded 'depth' is ignored for invalid lines and reinitialized by
+     * reset() on the next allocation, so nothing is needed.
      */
     void invalidate(const std::shared_ptr<::ReplacementPolicy::ReplacementData>& rd) const override;
 
     /**
      * Choose a victim among candidates in the set.
-     * We scan the provided candidates (which are all lines in the set) and
-     * select the one with the maximum depth, i.e., the “most LRU” according to
-     * our bounded counter. This avoids assuming any order correspondence between
-     * candidates and physical ways, which gem5 does not guarantee.
+     * We scan the provided candidates and select the one with the maximum depth,
+     * i.e., the “most LRU” according to our bounded counter. This avoids any
+     * reliance on candidate order vs physical way.
      */
     ReplaceableEntry* getVictim(const ReplacementCandidates& candidates) const override;
 };
@@ -112,4 +115,3 @@ class LRUIPVRP : public Base
 } // namespace ReplacementPolicy
 
 #endif // __MEM_CACHE_REPLACEMENT_POLICIES_LRU_IPV_HH__
-
