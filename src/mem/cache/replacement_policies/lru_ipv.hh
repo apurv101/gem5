@@ -49,7 +49,7 @@ class LRUIPVRP : public Base
      * NOTE: Only declared here; definition with initializer is in the .cc to
      * avoid ODR issues on older compilers/toolchains.
      */
-    static constexpr unsigned IPV[IPV_K + 1];
+    static const unsigned IPV[IPV_K + 1];
 
     /** Associativity as provided by the cache. */
     const unsigned ways;

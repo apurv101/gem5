@@ -6,7 +6,7 @@ namespace ReplacementPolicy {
 
 /** Provide definitions for the static constexprs declared in the header. */
 constexpr unsigned LRUIPVRP::IPV_K;
-constexpr unsigned LRUIPVRP::IPV[LRUIPVRP::IPV_K + 1] = {
+const unsigned LRUIPVRP::IPV[LRUIPVRP::IPV_K + 1] = {
     /* promotion targets for positions 0..15, then insertion at index 16 */
     0, 0, 1, 0, 3, 0, 1, 2, 1, 0, 5, 1, 0, 0, 1, 11, 13
 };
